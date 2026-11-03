@@ -2,7 +2,7 @@
 
 Aplicación web construida con Streamlit para consultar y analizar métricas operativas de entornos Teradata. Incluye informes interactivos, visualizaciones y descarga de resultados en CSV.
 
-**Versión actual: 1.0.5.** Incrementa el último número (`X`) en cada cambio de la aplicación.
+**Versión actual: 1.0.16.** Incrementa el último número (`X`) en cada cambio de la aplicación.
 
 ## Funcionalidades
 
@@ -22,12 +22,26 @@ Aplicación web construida con Streamlit para consultar y analizar métricas ope
 - Análisis de errores de espacio («No more room»).
 - Análisis de errores de spool (códigos Teradata 2646 y 2647).
 
+### Revisión de espacio
+
+- Consulta editable del histórico de `PDCRINFO.DatabaseSpace_Hst`.
+- Filtro por fechas para consultar la evolución del espacio utilizado.
+- Gráfico agregado para el sistema completo o desglosado por base de datos.
+- Indicadores de espacio actual y capacidades incluidas en la consulta.
+- La consulta inicial incluye todas las bases de datos con espacio actual mayor que cero.
+- Revisión del espacio actual por base de datos y tabla desde `DBC.TableSizeV`, con gráfico de las tablas de mayor consumo.
+- Revisión editable del skew por tabla, mostrando el ratio y un gráfico de las tablas con mayor skew.
+- Revisión de `IncrementalRestoreEnabled` de `DBC.TablesV`, con espacio agregado por valor de la marca.
+- Análisis histórico del espacio de tablas con `IncrementalRestoreEnabled`, filtro de fechas, consulta modificable y gráfico de evolución.
+
 ### Configuraciones
 
 - Añadir, modificar y quitar conexiones Teradata guardadas localmente en `conexiones.conf`.
-- Consultar sistema, dirección y usuario; las contraseñas no se muestran.
+- Consultar sistema, dirección, puerto y usuario; las contraseñas no se muestran.
 
 Los análisis que trabajan con fechas permiten seleccionar un intervalo. Por defecto, la aplicación propone desde el primer día del mes anterior hasta ayer. Los resultados pueden incluir tablas y gráficos; los informes que ofrecen exportación se pueden descargar en formato CSV.
+
+Al finalizar la ejecución de una consulta, la aplicación muestra el número de registros y el tiempo empleado en conectar, ejecutar y recuperar sus resultados.
 
 El análisis de phantom spool no limita los resultados por fecha en su consulta predeterminada. La consulta generada sigue siendo editable.
 
@@ -73,13 +87,13 @@ Streamlit mostrará en la terminal la dirección local para abrir la aplicación
 La página **Configuraciones** gestiona `conexiones.conf`, un CSV separado por comas con esta cabecera y una conexión por fila:
 
 ```csv
-sistema,ip_address,username,userpassword
-Produccion,teradata.example.com,mi_usuario,mi_contraseña
+sistema,ip_address,port,username,userpassword
+Produccion,teradata.example.com,1025,mi_usuario,mi_contraseña
 ```
 
-Configuraciones permite añadir, modificar o quitar registros. Al modificar una conexión, deja la contraseña vacía para conservar la guardada. Los ficheros CSV creados con la cabecera anterior (`ip_address,username,userpassword`) siguen siendo compatibles; al guardar cambios, se añade la columna `sistema`, inicialmente vacía para las conexiones anteriores.
+Configuraciones permite añadir, modificar o quitar registros, incluido el puerto Teradata (por defecto `1025`). Al modificar una conexión, deja la contraseña vacía para conservar la guardada. Los ficheros CSV anteriores que no tengan las columnas `sistema` o `port` siguen siendo compatibles; se asigna el puerto predeterminado `1025` hasta que se guarden cambios.
 
-Al seleccionar una conexión en la barra lateral, la aplicación completa la dirección, el usuario y la contraseña. También se puede elegir un host personalizado e introducir las credenciales manualmente. El fichero guarda contraseñas en texto plano y la aplicación no autentica a sus usuarios: limita el acceso a la aplicación a tu equipo local o a una red de confianza, o sustituye el almacenamiento por un gestor de secretos. **No publiques `conexiones.conf`, `passwords.txt` ni credenciales en GitHub.** Las entradas antiguas de `passwords.txt` no se migran automáticamente porque no incluyen la dirección del servidor.
+Al seleccionar una conexión en la barra lateral, la aplicación completa la dirección, el puerto, el usuario y la contraseña. También se puede elegir un host personalizado y ajustar su puerto en la barra lateral. El fichero guarda contraseñas en texto plano y la aplicación no autentica a sus usuarios: limita el acceso a la aplicación a tu equipo local o a una red de confianza, o sustituye el almacenamiento por un gestor de secretos. **No publiques `conexiones.conf`, `passwords.txt` ni credenciales en GitHub.** Las entradas antiguas de `passwords.txt` no se migran automáticamente porque no incluyen la dirección del servidor.
 
 ## Uso responsable
 

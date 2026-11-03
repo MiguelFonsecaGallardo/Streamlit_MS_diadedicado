@@ -1,6 +1,7 @@
 import csv
 import os
 import tempfile
+import time
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
@@ -8,7 +9,7 @@ import streamlit as st
 import teradatasql
 from datetime import date, timedelta
 
-APP_VERSION = "1.0.5"
+APP_VERSION = "1.0.16"
 
 # --- Date Calculation Logic ---
 # Today's date reference
@@ -70,7 +71,14 @@ st.set_page_config(page_title="Teradata Management & Analysis", layout="wide")
 
 # --- Helpers for the local connections file ---
 CONNECTIONS_FILE = "conexiones.conf"
-CONNECTION_FIELDS = ("sistema", "ip_address", "username", "userpassword")
+DEFAULT_TD_PORT = 1025
+CONNECTION_FIELDS = (
+    "sistema",
+    "ip_address",
+    "port",
+    "username",
+    "userpassword",
+)
 LEGACY_CONNECTION_FIELDS = ("ip_address", "username", "userpassword")
 
 
@@ -94,12 +102,24 @@ def load_connections(file_path: str = CONNECTIONS_FILE) -> list[dict[str, str]]:
             connection["sistema"] = connection["sistema"].strip()
             connection["ip_address"] = connection["ip_address"].strip()
             connection["username"] = connection["username"].strip()
+            connection["port"] = connection["port"].strip() or str(DEFAULT_TD_PORT)
             if not all(
                 connection[field].strip() for field in LEGACY_CONNECTION_FIELDS
             ):
                 raise ValueError(
                     f"La fila {line_number} debe incluir dirección, usuario y contraseña."
                 )
+            try:
+                port = int(connection["port"])
+            except ValueError as exc:
+                raise ValueError(
+                    f"El puerto de la fila {line_number} debe ser un entero entre 1 y 65535."
+                ) from exc
+            if not 1 <= port <= 65535:
+                raise ValueError(
+                    f"El puerto de la fila {line_number} debe estar entre 1 y 65535."
+                )
+            connection["port"] = str(port)
             connections.append(connection)
     return connections
 
@@ -151,12 +171,12 @@ theme_mode = st.session_state.get("theme_mode", "Dark")
 if theme_mode == "Dark":
     bg_app = TD_NAVY_DEEP
     bg_card = TD_NAVY_MID
-    text_color = TD_WHITE
-    header_color = TD_WHITE
+    text_color = "#E6EDF3"
+    header_color = "#E6EDF3"
     border_color = TD_DARK_BORDER
     chart_bg = TD_NAVY_MID
     chart_grid = TD_DARK_BORDER
-    chart_text = TD_STEEL
+    chart_text = "#C4D0DA"
     active_sequence = TD_DARK_SEQUENCE
     logo_color = "#FFFFFF"
 else:
@@ -170,6 +190,37 @@ else:
     chart_text = TD_MUTED
     active_sequence = TD_SEQUENCE
     logo_color = "#001A2C"
+
+dark_text_styles = ""
+if theme_mode == "Dark":
+    dark_text_styles = f"""
+        [data-testid="stAppViewContainer"] :is(
+            p, label, small, li, summary,
+            [data-testid="stMarkdownContainer"],
+            [data-testid="stCaptionContainer"],
+            [data-testid="stWidgetLabel"],
+            [data-testid="stMetricLabel"],
+            [data-testid="stMetricValue"],
+            [data-testid="stAlert"]
+        ),
+        [data-testid="stSidebar"] :is(
+            p, label, small, li, summary,
+            [data-testid="stMarkdownContainer"],
+            [data-testid="stCaptionContainer"],
+            [data-testid="stWidgetLabel"]
+        ),
+        [data-testid="stAppViewContainer"] [data-baseweb="select"] *,
+        [data-testid="stAppViewContainer"] [role="option"],
+        [data-testid="stAppViewContainer"] [role="listbox"],
+        .stButton button:not([kind="primary"]) {{
+            color: {text_color} !important;
+        }}
+
+        [data-testid="stAppViewContainer"] [data-testid="stDataFrame"],
+        [data-testid="stSidebar"] [data-testid="stDataFrame"] {{
+            color: {text_color} !important;
+        }}
+    """
 
 # --- Sidebar: Top Logo ---
 st.sidebar.caption(f"Versión {APP_VERSION}")
@@ -186,7 +237,12 @@ st.sidebar.markdown(logo_html, unsafe_allow_html=True)
 # --- Sidebar: Page Selector ---
 selected_page = st.sidebar.radio(
     "Navigation",
-    options=["📊 Graficas dia dedicado", "🔍 Revisiones", "⚙️ Configuraciones"],
+    options=[
+        "📊 Graficas dia dedicado",
+        "🔍 Revisiones",
+        "📦 Revisión de espacio",
+        "⚙️ Configuraciones",
+    ],
     index=0,
     key="page_selector",
 )
@@ -203,7 +259,7 @@ connection_indexes_by_label = {}
 for connection_index, connection in enumerate(CONNECTIONS):
     system_label = connection["sistema"] or "Sin sistema"
     label = (
-        f"{system_label} — {connection['ip_address']} — "
+        f"{system_label} — {connection['ip_address']}:{connection['port']} — "
         f"{connection['username']}"
     )
     if label in connections_by_label:
@@ -240,8 +296,17 @@ selected_host_option = st.sidebar.selectbox(
 selected_connection = connections_by_label.get(selected_host_option)
 if selected_connection:
     host = selected_connection["ip_address"]
+    port = int(selected_connection["port"])
 else:
     host = st.sidebar.text_input("Enter custom host / IP", value="")
+    port = st.sidebar.number_input(
+        "Puerto Teradata",
+        min_value=1,
+        max_value=65535,
+        value=DEFAULT_TD_PORT,
+        step=1,
+        key="custom_connection_port",
+    )
 
 user = st.sidebar.text_input("Username", key="connection_username")
 password = st.sidebar.text_input(
@@ -256,8 +321,27 @@ if CONNECTIONS_ERROR:
 
 # Connection Helper Function
 def execute_teradata_query(sql_query: str):
-    with teradatasql.connect(host=host, user=user, password=password) as conn:
-        return pd.read_sql(sql_query, conn)
+    started_at = time.perf_counter()
+    try:
+        connection_host = f"[{host}]" if ":" in host and not host.startswith("[") else host
+        with teradatasql.connect(
+            host=f"{connection_host}:{port}",
+            user=user,
+            password=password,
+        ) as conn:
+            result = pd.read_sql(sql_query, conn)
+    finally:
+        st.session_state["last_query_duration_seconds"] = (
+            time.perf_counter() - started_at
+        )
+    return result
+
+
+def query_duration_text() -> str:
+    duration = st.session_state.get("last_query_duration_seconds")
+    if duration is None:
+        return "Tiempo de ejecución: no disponible"
+    return f"Tiempo de ejecución: {duration:.2f} s"
 
 
 # Sidebar Test Connection Button
@@ -268,7 +352,9 @@ if st.sidebar.button("🔌 Test connection", key="btn_test_conn", use_container_
         try:
             with st.sidebar.spinner("Testing connection..."):
                 execute_teradata_query("SELECT 1;")
-            st.sidebar.success("Connection successful!")
+            st.sidebar.success(
+                f"Connection successful! {query_duration_text()}"
+            )
         except Exception as e:
             st.sidebar.error(f"Connection failed: {str(e)}")
 
@@ -302,6 +388,12 @@ st.markdown(
         .stApp {{
             background-color: {bg_app};
         }}
+
+        [data-testid="stSidebar"] {{
+            background-color: {bg_app};
+        }}
+
+        {dark_text_styles}
         
         /* Headers & Subheaders styling */
         h1, h2, h3, .stSubheader {{
@@ -319,6 +411,17 @@ st.markdown(
         button[data-baseweb="tab"][aria-selected="true"] p {{
             color: {TD_ORANGE if theme_mode == "Dark" else TD_NAVY} !important;
             font-weight: 700;
+        }}
+
+        @keyframes incremental-restore-pulse {{
+            0%, 100% {{ opacity: 1; }}
+            50% {{ opacity: 0.25; }}
+        }}
+        .incremental-restore-running {{
+            animation: incremental-restore-pulse 1s ease-in-out infinite;
+            font-weight: 600;
+            color: {text_color};
+            padding: 0.5rem 0;
         }}
         
         /* Primary Buttons */
@@ -451,6 +554,134 @@ WHERE DatabaseName NOT IN (
 AND CurrentSpool > 0
 GROUP BY DatabaseName
 ORDER BY 2 DESC;""".strip()
+
+
+def get_space_review_sql(start_date, end_date):
+    start_str = start_date.strftime("%Y-%m-%d")
+    end_str = end_date.strftime("%Y-%m-%d")
+    return f"""SELECT
+    EXTRACT(MONTH FROM cal.calendar_date) AS TheMonth,
+    EXTRACT(YEAR FROM cal.calendar_date) AS TheYear,
+    db.LogDate,
+    db.DatabaseName,
+    db.Current_Perm_DB_GB,
+    db.Max_Perm_DB_GB,
+    53500 AS Max_User_Perm_GB,
+    cap.Max_Perm_SYS_GB
+FROM (
+    SELECT
+        LogDate,
+        DatabaseName,
+        CAST(SUM(CurrentPerm) / (1024 ** 3) AS INTEGER) AS Current_Perm_DB_GB,
+        CAST(SUM(MaxPerm) / (1024 ** 3) AS INTEGER) AS Max_Perm_DB_GB
+    FROM PDCRINFO.DatabaseSpace_Hst
+    WHERE LogDate BETWEEN DATE '{start_str}' AND DATE '{end_str}'
+    GROUP BY LogDate, DatabaseName
+) db
+INNER JOIN SYS_CALENDAR.CALENDAR cal
+    ON db.LogDate = cal.calendar_date
+CROSS JOIN (
+    SELECT CAST(SUM(MaxPerm) / (1000 ** 3) AS INTEGER) AS Max_Perm_SYS_GB
+    FROM DBC.DiskSpaceV
+) cap
+WHERE db.Current_Perm_DB_GB > 0
+ORDER BY TheYear, TheMonth, db.LogDate;""".strip()
+
+
+def get_table_space_sql():
+    return """SELECT
+    DatabaseName,
+    TableName,
+    SUM(CurrentPerm) / (1000 ** 3) AS Current_Perm_GB
+FROM DBC.TableSizeV
+GROUP BY DatabaseName, TableName
+ORDER BY Current_Perm_GB DESC;""".strip()
+
+
+def get_skew_review_sql():
+    return """SELECT
+    xa.DatabaseName,
+    xa.TableName,
+    CAST(xa.espacio_ocupado_GB / (1000 ** 3) AS DECIMAL(8,2)) AS Espacio_Ocupado_GB,
+    CAST(xa.espacio_real_GB / (1000 ** 3) AS DECIMAL(8,2)) AS Espacio_Real_GB,
+    xa.ratio AS Ratio
+FROM (
+    SELECT
+        DatabaseName,
+        TableName,
+        SUM(CurrentPerm) AS espacio_ocupado_GB,
+        MAX(CurrentPerm) * (SEL HASHAMP() + 1) AS espacio_real_GB,
+        100 * espacio_real_GB / espacio_ocupado_GB AS ratio
+    FROM DBC.TableSizeV
+    WHERE DatabaseName NOT IN ('DBC')
+    GROUP BY 1, 2
+    HAVING
+        (espacio_ocupado_GB > 1000 ** 3 AND ratio > 150)
+        OR (espacio_real_GB - espacio_ocupado_GB > 10 * (1000 ** 3))
+) xa
+ORDER BY 3 DESC;""".strip()
+
+
+def get_incremental_restore_sql():
+    return """SELECT
+    tables.DatabaseName,
+    tables.TableName,
+    tables.TableKind,
+    tables.IncrementalRestoreEnabled,
+    COALESCE(table_space.CurrentPerm, 0) / (1000 ** 3) AS Current_Perm_GB
+FROM DBC.TablesV AS tables
+LEFT JOIN (
+    SELECT
+        DatabaseName,
+        TableName,
+        SUM(CurrentPerm) AS CurrentPerm
+    FROM DBC.TableSizeV
+    GROUP BY DatabaseName, TableName
+) AS table_space
+    ON tables.DatabaseName = table_space.DatabaseName
+   AND tables.TableName = table_space.TableName
+WHERE tables.IncrementalRestoreEnabled IS NOT NULL
+ORDER BY tables.IncrementalRestoreEnabled, Current_Perm_GB DESC;""".strip()
+
+
+def get_incremental_restore_history_sql(start_date, end_date):
+    start_str = start_date.strftime("%Y-%m-%d")
+    end_str = end_date.strftime("%Y-%m-%d")
+    return f"""SELECT
+    space_hist.LogDate,
+    space_hist.DatabaseName,
+    space_hist.TableName,
+    tables.TableKind,
+    tables.IncrementalRestoreEnabled,
+    SUM(space_hist.CurrentPerm) / (1000 ** 3) AS Current_Perm_GB
+FROM PDCRINFO.TableSpace_Hst AS space_hist
+INNER JOIN DBC.TablesV AS tables
+    ON space_hist.DatabaseName = tables.DatabaseName
+   AND space_hist.TableName = tables.TableName
+WHERE space_hist.LogDate BETWEEN DATE '{start_str}' AND DATE '{end_str}'
+  AND tables.IncrementalRestoreEnabled IS NOT NULL
+GROUP BY
+    space_hist.LogDate,
+    space_hist.DatabaseName,
+    space_hist.TableName,
+    tables.TableKind,
+    tables.IncrementalRestoreEnabled
+ORDER BY
+    space_hist.LogDate,
+    tables.IncrementalRestoreEnabled,
+    space_hist.DatabaseName,
+    space_hist.TableName;""".strip()
+
+
+def find_column_case_insensitive(dataframe: pd.DataFrame, column_name: str):
+    return next(
+        (
+            column
+            for column in dataframe.columns
+            if str(column).casefold() == column_name.casefold()
+        ),
+        None,
+    )
 
 
 def get_workload_sql(start_date, end_date):
@@ -717,7 +948,9 @@ if selected_page == "📊 Graficas dia dedicated" or selected_page == "📊 Graf
                     with st.spinner("Connecting to Teradata and executing query..."):
                         df = execute_teradata_query(query)
 
-                    st.success(f"Query returned {len(df)} rows.")
+                    st.success(
+                        f"Query returned {len(df)} rows. {query_duration_text()}"
+                    )
                     st.dataframe(df, use_container_width=True)
 
                     csv_data = df.to_csv(index=False).encode("utf-8")
@@ -784,7 +1017,10 @@ if selected_page == "📊 Graficas dia dedicated" or selected_page == "📊 Graf
                     with st.spinner("Fetching backup metrics from Teradata..."):
                         df_backup = execute_teradata_query(sql_backup_input)
 
-                    st.success(f"Retrieved {len(df_backup)} backup job execution records.")
+                    st.success(
+                        f"Retrieved {len(df_backup)} backup job execution records. "
+                        f"{query_duration_text()}"
+                    )
 
                     if not df_backup.empty:
                         status_icon_map = {
@@ -908,7 +1144,10 @@ if selected_page == "📊 Graficas dia dedicated" or selected_page == "📊 Graf
                     with st.spinner("Extracting workload history from PDCRINFO..."):
                         df_workload = execute_teradata_query(sql_workload_input)
 
-                    st.success(f"Retrieved {len(df_workload)} workload entries.")
+                    st.success(
+                        f"Retrieved {len(df_workload)} workload entries. "
+                        f"{query_duration_text()}"
+                    )
 
                     if not df_workload.empty:
                         df_workload["LogDate"] = pd.to_datetime(df_workload["LogDate"])
@@ -997,7 +1236,10 @@ if selected_page == "📊 Graficas dia dedicated" or selected_page == "📊 Graf
                     with st.spinner("Extracting workload history from PDCRINFO..."):
                         df_workload_io = execute_teradata_query(sql_workload_io_input)
 
-                    st.success(f"Retrieved {len(df_workload_io)} workload entries.")
+                    st.success(
+                        f"Retrieved {len(df_workload_io)} workload entries. "
+                        f"{query_duration_text()}"
+                    )
 
                     if not df_workload_io.empty:
                         df_workload_io["LogDate"] = pd.to_datetime(df_workload_io["LogDate"])
@@ -1085,7 +1327,10 @@ if selected_page == "📊 Graficas dia dedicated" or selected_page == "📊 Graf
                     with st.spinner("Extracting workload history from PDCRINFO..."):
                         df_workload_conc = execute_teradata_query(sql_workload_conc_input)
 
-                    st.success(f"Retrieved {len(df_workload_conc)} workload entries.")
+                    st.success(
+                        f"Retrieved {len(df_workload_conc)} workload entries. "
+                        f"{query_duration_text()}"
+                    )
 
                     if not df_workload_conc.empty:
                         df_workload_conc["LogDate"] = pd.to_datetime(df_workload_conc["LogDate"])
@@ -1173,7 +1418,10 @@ if selected_page == "📊 Graficas dia dedicated" or selected_page == "📊 Graf
                     with st.spinner("Extracting memory usage from DBC.ResUsageSpma..."):
                         df_mem = execute_teradata_query(sql_memory_input)
 
-                    st.success(f"Retrieved {len(df_mem)} memory usage records.")
+                    st.success(
+                        f"Retrieved {len(df_mem)} memory usage records. "
+                        f"{query_duration_text()}"
+                    )
 
                     if not df_mem.empty:
                         df_mem["Timestamp"] = pd.to_datetime(
@@ -1261,7 +1509,10 @@ if selected_page == "📊 Graficas dia dedicated" or selected_page == "📊 Graf
                     with st.spinner("Extracting swap metrics from PDCRDATA.ResUsageSpma_HST..."):
                         df_swap = execute_teradata_query(sql_swap_input)
 
-                    st.success(f"Retrieved {len(df_swap)} swap metrics records.")
+                    st.success(
+                        f"Retrieved {len(df_swap)} swap metrics records. "
+                        f"{query_duration_text()}"
+                    )
 
                     if not df_swap.empty:
                         # Dual axis Plotly figure enabling/disabling metrics via legend click
@@ -1386,7 +1637,10 @@ if selected_page == "📊 Graficas dia dedicated" or selected_page == "📊 Graf
                     with st.spinner("Extracting FlowControl metrics from dbc.ResUsageSAWT..."):
                         df_flow = execute_teradata_query(sql_flow_input)
 
-                    st.success(f"Retrieved {len(df_flow)} FlowControl metric records.")
+                    st.success(
+                        f"Retrieved {len(df_flow)} FlowControl metric records. "
+                        f"{query_duration_text()}"
+                    )
 
                     if not df_flow.empty:
                         fig_flow = px.line(
@@ -1478,7 +1732,10 @@ elif selected_page == "🔍 Revisiones":
                     with st.spinner("Scanning system for phantom spool space..."):
                         df_spool = execute_teradata_query(sql_spool_input)
 
-                    st.success(f"Scan complete. Found {len(df_spool)} database(s) holding spool.")
+                    st.success(
+                        f"Scan complete. Found {len(df_spool)} database(s) holding spool. "
+                        f"{query_duration_text()}"
+                    )
 
                     if not df_spool.empty and "TOTAL_GB" in df_spool.columns:
                         c1, c2 = st.columns(2)
@@ -1573,7 +1830,10 @@ elif selected_page == "🔍 Revisiones":
                     with st.spinner("Analyzing DBQLogTbl_Hst for line-by-line inserts..."):
                         df_inserts = execute_teradata_query(sql_inserts_input)
 
-                    st.success(f"Retrieved {len(df_inserts)} sessions exceeding 1,000 single line inserts.")
+                    st.success(
+                        f"Retrieved {len(df_inserts)} sessions exceeding 1,000 "
+                        f"single line inserts. {query_duration_text()}"
+                    )
 
                     if not df_inserts.empty:
                         st.dataframe(df_inserts, use_container_width=True)
@@ -1660,7 +1920,10 @@ elif selected_page == "🔍 Revisiones":
                     with st.spinner("Analyzing DBQLogTbl_hst for space errors..."):
                         df_espacio = execute_teradata_query(sql_espacio_input)
 
-                    st.success(f"Retrieved {len(df_espacio)} space error records.")
+                    st.success(
+                        f"Retrieved {len(df_espacio)} space error records. "
+                        f"{query_duration_text()}"
+                    )
 
                     if not df_espacio.empty:
                         st.dataframe(df_espacio, use_container_width=True)
@@ -1749,7 +2012,10 @@ elif selected_page == "🔍 Revisiones":
                     with st.spinner("Analyzing DBQLogTbl_hst for spool errors (2646/2647)..."):
                         df_spool_err = execute_teradata_query(sql_spool_err_input)
 
-                    st.success(f"Retrieved {len(df_spool_err)} spool error records.")
+                    st.success(
+                        f"Retrieved {len(df_spool_err)} spool error records. "
+                        f"{query_duration_text()}"
+                    )
 
                     if not df_spool_err.empty:
                         st.dataframe(df_spool_err, use_container_width=True)
@@ -1783,7 +2049,923 @@ elif selected_page == "🔍 Revisiones":
                     st.error(f"Error executing spool error query: {str(e)}")
 
 # =========================================================
-# PAGE 3: CONFIGURACIONES
+# PAGE 3: REVISION DE ESPACIO
+# =========================================================
+elif selected_page == "📦 Revisión de espacio":
+    st.title("Revisión de espacio")
+    st.markdown('<div class="td-accent-bar"></div>', unsafe_allow_html=True)
+    st.markdown(
+        "Consulta la evolución del espacio utilizado, agregada para todo el "
+        "sistema o desglosada por base de datos."
+    )
+
+    (
+        tab_space_history,
+        tab_table_space,
+        tab_skew_review,
+        tab_incremental_restore,
+        tab_incremental_restore_history,
+    ) = st.tabs(
+        [
+            "Evolución del espacio",
+            "Revisión a nivel de tablas",
+            "Revisión de skew",
+            "Incremental restore",
+            "Incremental restore análisis",
+        ]
+    )
+    with tab_space_history:
+        if "space_review_start_date" not in st.session_state:
+            st.session_state["space_review_start_date"] = TODAY - timedelta(days=365)
+        if "space_review_end_date" not in st.session_state:
+            st.session_state["space_review_end_date"] = DEFAULT_END_DATE
+        if "space_review_sql" not in st.session_state:
+            st.session_state["space_review_sql"] = get_space_review_sql(
+                st.session_state["space_review_start_date"],
+                st.session_state["space_review_end_date"],
+            )
+
+        col_space_date1, col_space_date2 = st.columns(2)
+        with col_space_date1:
+            start_date_space = st.date_input(
+                "Fecha inicial",
+                value=st.session_state["space_review_start_date"],
+                key="input_space_review_start_date",
+            )
+        with col_space_date2:
+            end_date_space = st.date_input(
+                "Fecha final",
+                value=st.session_state["space_review_end_date"],
+                key="input_space_review_end_date",
+            )
+
+        if st.button("Actualizar fechas de la consulta", key="btn_update_space_review_dates"):
+            if start_date_space > end_date_space:
+                st.error("La fecha inicial no puede ser posterior a la fecha final.")
+            else:
+                st.session_state["space_review_start_date"] = start_date_space
+                st.session_state["space_review_end_date"] = end_date_space
+                st.session_state["space_review_sql"] = get_space_review_sql(
+                    start_date_space, end_date_space
+                )
+                st.rerun()
+
+        st.caption(
+            "La consulta predeterminada incluye todas las bases de datos con espacio "
+            "actual mayor que 0, para no omitir bases pequeñas del total del sistema. "
+            "Al actualizar las fechas se regenera el SQL; puedes editarlo antes de ejecutarlo."
+        )
+        sql_space_review_input = st.text_area(
+            "Consulta de revisión de espacio",
+            height=320,
+            key="space_review_sql",
+        )
+        space_review_chart_mode = st.selectbox(
+            "Nivel del gráfico",
+            options=["Sistema completo", "Por base de datos"],
+            key="space_review_chart_mode",
+        )
+
+        if st.button(
+            "Ejecutar revisión de espacio",
+            type="primary",
+            key="btn_space_review_exec",
+        ):
+            if not host or not user or not password:
+                st.error("Please fill in all connection details in the sidebar.")
+            elif not sql_space_review_input.strip():
+                st.warning("Please enter a valid query.")
+            else:
+                try:
+                    with st.spinner("Consultando el histórico de espacio..."):
+                        df_space_review = execute_teradata_query(sql_space_review_input)
+
+                    st.success(
+                        f"Consulta completada. Se obtuvieron {len(df_space_review)} "
+                        f"registros. {query_duration_text()}"
+                    )
+                    if df_space_review.empty:
+                        st.info("La consulta no devolvió registros para el intervalo seleccionado.")
+                    else:
+                        st.dataframe(df_space_review)
+
+                        date_col = find_column_case_insensitive(df_space_review, "LogDate")
+                        database_col = find_column_case_insensitive(
+                            df_space_review, "DatabaseName"
+                        )
+                        current_space_col = find_column_case_insensitive(
+                            df_space_review, "Current_Perm_DB_GB"
+                        )
+                        system_capacity_col = find_column_case_insensitive(
+                            df_space_review, "Max_Perm_SYS_GB"
+                        )
+                        user_capacity_col = find_column_case_insensitive(
+                            df_space_review, "Max_User_Perm_GB"
+                        )
+
+                        if not date_col or not database_col or not current_space_col:
+                            st.warning(
+                                "No se puede generar el gráfico. La consulta debe devolver "
+                                "las columnas LogDate, DatabaseName y Current_Perm_DB_GB."
+                            )
+                        else:
+                            chart_data = df_space_review.copy()
+                            chart_data["_space_review_date"] = pd.to_datetime(
+                                chart_data[date_col], errors="coerce"
+                            )
+                            chart_data["_space_review_gb"] = pd.to_numeric(
+                                chart_data[current_space_col], errors="coerce"
+                            )
+                            chart_data = chart_data.dropna(
+                                subset=["_space_review_date", "_space_review_gb"]
+                            )
+
+                            if chart_data.empty:
+                                st.warning(
+                                    "La consulta no contiene fechas o valores de espacio "
+                                    "válidos para graficar."
+                                )
+                            else:
+                                latest_date = chart_data["_space_review_date"].max()
+                                latest_data = chart_data[
+                                    chart_data["_space_review_date"] == latest_date
+                                ]
+                                latest_total_gb = latest_data["_space_review_gb"].sum()
+                                database_count = latest_data[database_col].nunique()
+
+                                system_capacity_gb = None
+                                if system_capacity_col:
+                                    capacity_values = pd.to_numeric(
+                                        latest_data[system_capacity_col], errors="coerce"
+                                    ).dropna()
+                                    if not capacity_values.empty:
+                                        system_capacity_gb = capacity_values.max()
+
+                                user_capacity_gb = None
+                                if user_capacity_col:
+                                    capacity_values = pd.to_numeric(
+                                        latest_data[user_capacity_col], errors="coerce"
+                                    ).dropna()
+                                    if not capacity_values.empty:
+                                        user_capacity_gb = capacity_values.max()
+
+                                metric_columns = st.columns(4)
+                                metric_columns[0].metric(
+                                    "Espacio actual (GB)", f"{latest_total_gb:,.0f}"
+                                )
+                                metric_columns[1].metric(
+                                    "Capacidad actual del sistema (GB)",
+                                    f"{system_capacity_gb:,.0f}"
+                                    if system_capacity_gb is not None
+                                    else "—",
+                                )
+                                metric_columns[2].metric(
+                                    "Máximo de usuario (GB)",
+                                    f"{user_capacity_gb:,.0f}"
+                                    if user_capacity_gb is not None
+                                    else "—",
+                                )
+                                metric_columns[3].metric(
+                                    "Bases de datos", f"{database_count:,}"
+                                )
+
+                                if space_review_chart_mode == "Sistema completo":
+                                    plot_data = (
+                                        chart_data.groupby(
+                                            "_space_review_date", as_index=False
+                                        )["_space_review_gb"]
+                                        .sum()
+                                        .sort_values("_space_review_date")
+                                    )
+                                    fig_space_review = px.line(
+                                        plot_data,
+                                        x="_space_review_date",
+                                        y="_space_review_gb",
+                                        color_discrete_sequence=active_sequence,
+                                    )
+                                    chart_title = "Evolución del espacio utilizado — sistema completo"
+                                else:
+                                    chart_data["_space_review_database"] = (
+                                        chart_data[database_col]
+                                        .astype("string")
+                                        .fillna("Sin base de datos")
+                                    )
+                                    plot_data = (
+                                        chart_data.groupby(
+                                            [
+                                                "_space_review_date",
+                                                "_space_review_database",
+                                            ],
+                                            as_index=False,
+                                        )["_space_review_gb"]
+                                        .sum()
+                                        .sort_values("_space_review_date")
+                                    )
+                                    fig_space_review = px.line(
+                                        plot_data,
+                                        x="_space_review_date",
+                                        y="_space_review_gb",
+                                        color="_space_review_database",
+                                        color_discrete_sequence=active_sequence,
+                                    )
+                                    chart_title = "Evolución del espacio utilizado por base de datos"
+
+                                fig_space_review = apply_td_layout(
+                                    fig_space_review,
+                                    title_text=chart_title,
+                                    y_label="Espacio actual (GB)",
+                                )
+                                fig_space_review.update_layout(
+                                    xaxis_title="Fecha",
+                                    yaxis_title="Espacio actual (GB)",
+                                )
+                                st.plotly_chart(fig_space_review, width="stretch")
+
+                        csv_space_review = df_space_review.to_csv(index=False).encode(
+                            "utf-8"
+                        )
+                        st.download_button(
+                            label="Descargar resultados en CSV",
+                            data=csv_space_review,
+                            file_name="revision_espacio.csv",
+                            mime="text/csv",
+                            key="dl_space_review",
+                        )
+                except Exception as e:
+                    st.error(f"Error al ejecutar la consulta de revisión de espacio: {str(e)}")
+
+    with tab_table_space:
+        st.subheader("Espacio utilizado por tabla")
+        st.markdown(
+            "Consulta el espacio actual de cada tabla a partir de `DBC.TableSizeV`. "
+            "El gráfico muestra las tablas con mayor ocupación."
+        )
+
+        if "table_space_sql" not in st.session_state:
+            st.session_state["table_space_sql"] = get_table_space_sql()
+
+        sql_table_space_input = st.text_area(
+            "Consulta de espacio por tabla",
+            height=220,
+            key="table_space_sql",
+        )
+        table_chart_limit = st.number_input(
+            "Número de tablas en el gráfico",
+            min_value=1,
+            max_value=100,
+            value=20,
+            step=5,
+            key="table_space_chart_limit",
+        )
+
+        if st.button(
+            "Ejecutar revisión por tabla",
+            type="primary",
+            key="btn_table_space_exec",
+        ):
+            if not host or not user or not password:
+                st.error("Please fill in all connection details in the sidebar.")
+            elif not sql_table_space_input.strip():
+                st.warning("Please enter a valid query.")
+            else:
+                try:
+                    with st.spinner("Consultando el espacio utilizado por tabla..."):
+                        df_table_space = execute_teradata_query(sql_table_space_input)
+
+                    st.success(
+                        f"Consulta completada. Se obtuvieron {len(df_table_space)} "
+                        f"registros. {query_duration_text()}"
+                    )
+                    if df_table_space.empty:
+                        st.info("La consulta no devolvió registros.")
+                    else:
+                        st.dataframe(df_table_space)
+
+                        database_col = find_column_case_insensitive(
+                            df_table_space, "DatabaseName"
+                        )
+                        table_col = find_column_case_insensitive(
+                            df_table_space, "TableName"
+                        )
+                        table_space_col = find_column_case_insensitive(
+                            df_table_space, "Current_Perm_GB"
+                        )
+
+                        if not database_col or not table_col or not table_space_col:
+                            st.warning(
+                                "No se puede generar el gráfico. La consulta debe devolver "
+                                "DatabaseName, TableName y Current_Perm_GB."
+                            )
+                        else:
+                            chart_data = df_table_space[
+                                [database_col, table_col, table_space_col]
+                            ].copy()
+                            chart_data["_table_space_gb"] = pd.to_numeric(
+                                chart_data[table_space_col], errors="coerce"
+                            )
+                            chart_data = chart_data.dropna(
+                                subset=["_table_space_gb"]
+                            )
+
+                            if chart_data.empty:
+                                st.warning(
+                                    "La consulta no contiene valores de espacio válidos "
+                                    "para graficar."
+                                )
+                            else:
+                                chart_data["_database_label"] = (
+                                    chart_data[database_col]
+                                    .astype("string")
+                                    .fillna("Sin base de datos")
+                                )
+                                chart_data["_table_label"] = (
+                                    chart_data[table_col]
+                                    .astype("string")
+                                    .fillna("Sin nombre")
+                                )
+                                chart_data = (
+                                    chart_data.groupby(
+                                        ["_database_label", "_table_label"],
+                                        as_index=False,
+                                    )["_table_space_gb"]
+                                    .sum()
+                                    .sort_values("_table_space_gb", ascending=False)
+                                    .head(int(table_chart_limit))
+                                )
+                                chart_data["_full_table_name"] = (
+                                    chart_data["_database_label"]
+                                    + "."
+                                    + chart_data["_table_label"]
+                                )
+                                chart_data = chart_data.sort_values(
+                                    "_table_space_gb", ascending=True
+                                )
+
+                                fig_table_space = px.bar(
+                                    chart_data,
+                                    x="_table_space_gb",
+                                    y="_full_table_name",
+                                    orientation="h",
+                                    hover_data={
+                                        "_database_label": True,
+                                        "_table_label": True,
+                                        "_table_space_gb": ":,.2f",
+                                    },
+                                    color_discrete_sequence=active_sequence,
+                                )
+                                fig_table_space = apply_td_layout(
+                                    fig_table_space,
+                                    title_text=(
+                                        "Tablas con mayor consumo de espacio "
+                                        f"(top {int(table_chart_limit)})"
+                                    ),
+                                    y_label="",
+                                )
+                                fig_table_space.update_layout(
+                                    xaxis_title="Espacio actual (GB)",
+                                    yaxis_title="Base de datos y tabla",
+                                )
+                                st.plotly_chart(
+                                    fig_table_space,
+                                    width="stretch",
+                                )
+
+                        csv_table_space = df_table_space.to_csv(
+                            index=False
+                        ).encode("utf-8")
+                        st.download_button(
+                            label="Descargar resultados en CSV",
+                            data=csv_table_space,
+                            file_name="revision_espacio_tablas.csv",
+                            mime="text/csv",
+                            key="dl_table_space",
+                        )
+                except Exception as e:
+                    st.error(
+                        f"Error al ejecutar la consulta de espacio por tabla: {str(e)}"
+                    )
+
+    with tab_skew_review:
+        st.subheader("Revisión de skew por tabla")
+        st.markdown(
+            "El ratio representa el nivel de skew: cuanto mayor sea, mayor es la "
+            "desigualdad de distribución del espacio entre los AMP."
+        )
+
+        if "skew_review_sql" not in st.session_state:
+            st.session_state["skew_review_sql"] = get_skew_review_sql()
+
+        sql_skew_review_input = st.text_area(
+            "Consulta de revisión de skew",
+            height=300,
+            key="skew_review_sql",
+        )
+        skew_chart_limit = st.number_input(
+            "Número de tablas en el gráfico de skew",
+            min_value=1,
+            max_value=100,
+            value=20,
+            step=5,
+            key="skew_review_chart_limit",
+        )
+
+        if st.button(
+            "Ejecutar revisión de skew",
+            type="primary",
+            key="btn_skew_review_exec",
+        ):
+            if not host or not user or not password:
+                st.error("Please fill in all connection details in the sidebar.")
+            elif not sql_skew_review_input.strip():
+                st.warning("Please enter a valid query.")
+            else:
+                try:
+                    with st.spinner("Analizando la distribución de espacio entre AMP..."):
+                        df_skew_review = execute_teradata_query(sql_skew_review_input)
+
+                    st.success(
+                        f"Consulta completada. Se obtuvieron {len(df_skew_review)} "
+                        f"tablas. {query_duration_text()}"
+                    )
+                    if df_skew_review.empty:
+                        st.info("No se encontraron tablas que cumplan los criterios de skew.")
+                    else:
+                        st.dataframe(df_skew_review)
+
+                        database_col = find_column_case_insensitive(
+                            df_skew_review, "DatabaseName"
+                        )
+                        table_col = find_column_case_insensitive(
+                            df_skew_review, "TableName"
+                        )
+                        ratio_col = find_column_case_insensitive(
+                            df_skew_review, "Ratio"
+                        )
+
+                        if not database_col or not table_col or not ratio_col:
+                            st.warning(
+                                "No se puede generar el gráfico. La consulta debe devolver "
+                                "DatabaseName, TableName y Ratio."
+                            )
+                        else:
+                            chart_data = df_skew_review[
+                                [database_col, table_col, ratio_col]
+                            ].copy()
+                            chart_data["_skew_ratio"] = pd.to_numeric(
+                                chart_data[ratio_col], errors="coerce"
+                            )
+                            chart_data = chart_data.dropna(subset=["_skew_ratio"])
+
+                            if chart_data.empty:
+                                st.warning(
+                                    "La consulta no contiene ratios válidos para graficar."
+                                )
+                            else:
+                                chart_data["_database_label"] = (
+                                    chart_data[database_col]
+                                    .astype("string")
+                                    .fillna("Sin base de datos")
+                                )
+                                chart_data["_table_label"] = (
+                                    chart_data[table_col]
+                                    .astype("string")
+                                    .fillna("Sin nombre")
+                                )
+                                chart_data["_full_table_name"] = (
+                                    chart_data["_database_label"]
+                                    + "."
+                                    + chart_data["_table_label"]
+                                )
+                                chart_data = (
+                                    chart_data.sort_values(
+                                        "_skew_ratio", ascending=False
+                                    )
+                                    .head(int(skew_chart_limit))
+                                    .sort_values("_skew_ratio", ascending=True)
+                                )
+
+                                metric_columns = st.columns(2)
+                                metric_columns[0].metric(
+                                    "Ratio máximo de skew",
+                                    f"{chart_data['_skew_ratio'].max():,.2f}%",
+                                )
+                                metric_columns[1].metric(
+                                    "Tablas en el gráfico",
+                                    f"{len(chart_data):,}",
+                                )
+
+                                fig_skew_review = px.bar(
+                                    chart_data,
+                                    x="_skew_ratio",
+                                    y="_full_table_name",
+                                    orientation="h",
+                                    hover_data={
+                                        "_database_label": True,
+                                        "_table_label": True,
+                                        "_skew_ratio": ":,.2f",
+                                    },
+                                    color_discrete_sequence=active_sequence,
+                                )
+                                fig_skew_review = apply_td_layout(
+                                    fig_skew_review,
+                                    title_text=(
+                                        "Tablas con mayor nivel de skew "
+                                        f"(top {int(skew_chart_limit)})"
+                                    ),
+                                )
+                                fig_skew_review.update_layout(
+                                    xaxis_title="Ratio de skew (%)",
+                                    yaxis_title="Base de datos y tabla",
+                                )
+                                st.plotly_chart(
+                                    fig_skew_review,
+                                    width="stretch",
+                                )
+
+                        csv_skew_review = df_skew_review.to_csv(
+                            index=False
+                        ).encode("utf-8")
+                        st.download_button(
+                            label="Descargar resultados de skew en CSV",
+                            data=csv_skew_review,
+                            file_name="revision_skew.csv",
+                            mime="text/csv",
+                            key="dl_skew_review",
+                        )
+                except Exception as e:
+                    st.error(f"Error al ejecutar la consulta de revisión de skew: {str(e)}")
+
+    with tab_incremental_restore:
+        st.subheader("Espacio por configuración de incremental restore")
+        st.markdown(
+            "Consulta las tablas con `IncrementalRestoreEnabled` informado y "
+            "agrega su espacio actual según el valor de esa marca."
+        )
+
+        if "incremental_restore_sql" not in st.session_state:
+            st.session_state["incremental_restore_sql"] = (
+                get_incremental_restore_sql()
+            )
+
+        sql_incremental_restore_input = st.text_area(
+            "Consulta de incremental restore",
+            height=260,
+            key="incremental_restore_sql",
+        )
+
+        if st.button(
+            "Ejecutar revisión de incremental restore",
+            type="primary",
+            key="btn_incremental_restore_exec",
+        ):
+            if not host or not user or not password:
+                st.error("Please fill in all connection details in the sidebar.")
+            elif not sql_incremental_restore_input.strip():
+                st.warning("Please enter a valid query.")
+            else:
+                try:
+                    with st.spinner(
+                        "Consultando tablas y espacio de incremental restore..."
+                    ):
+                        df_incremental_restore = execute_teradata_query(
+                            sql_incremental_restore_input
+                        )
+
+                    st.success(
+                        "Consulta completada. Se obtuvieron "
+                        f"{len(df_incremental_restore)} tablas. "
+                        f"{query_duration_text()}"
+                    )
+                    if df_incremental_restore.empty:
+                        st.info(
+                            "No se encontraron tablas con "
+                            "IncrementalRestoreEnabled informado."
+                        )
+                    else:
+                        st.dataframe(df_incremental_restore)
+
+                        restore_flag_col = find_column_case_insensitive(
+                            df_incremental_restore, "IncrementalRestoreEnabled"
+                        )
+                        table_space_col = find_column_case_insensitive(
+                            df_incremental_restore, "Current_Perm_GB"
+                        )
+
+                        if not restore_flag_col or not table_space_col:
+                            st.warning(
+                                "No se puede agregar el espacio. La consulta debe devolver "
+                                "IncrementalRestoreEnabled y Current_Perm_GB."
+                            )
+                        else:
+                            chart_data = df_incremental_restore[
+                                [restore_flag_col, table_space_col]
+                            ].copy()
+                            chart_data["_incremental_restore_flag"] = (
+                                chart_data[restore_flag_col]
+                                .astype("string")
+                                .fillna("Sin valor")
+                            )
+                            chart_data["_incremental_restore_space_gb"] = pd.to_numeric(
+                                chart_data[table_space_col], errors="coerce"
+                            )
+                            chart_data = chart_data.dropna(
+                                subset=["_incremental_restore_space_gb"]
+                            )
+                            summary = (
+                                chart_data.groupby(
+                                    "_incremental_restore_flag", as_index=False
+                                )
+                                .agg(
+                                    Current_Perm_GB=(
+                                        "_incremental_restore_space_gb",
+                                        "sum",
+                                    ),
+                                    Table_Count=(
+                                        "_incremental_restore_space_gb",
+                                        "size",
+                                    ),
+                                )
+                                .sort_values("Current_Perm_GB", ascending=False)
+                            )
+
+                            if summary.empty:
+                                st.warning(
+                                    "La consulta no contiene valores de espacio "
+                                    "válidos para agregar."
+                                )
+                            else:
+                                st.subheader("Espacio agregado por marca")
+                                st.dataframe(summary, hide_index=True)
+
+                                fig_incremental_restore = px.bar(
+                                    summary,
+                                    x="_incremental_restore_flag",
+                                    y="Current_Perm_GB",
+                                    color="_incremental_restore_flag",
+                                    color_discrete_sequence=active_sequence,
+                                )
+                                fig_incremental_restore = apply_td_layout(
+                                    fig_incremental_restore,
+                                    title_text=(
+                                        "Espacio agregado por "
+                                        "IncrementalRestoreEnabled"
+                                    ),
+                                    y_label="Espacio actual (GB)",
+                                )
+                                fig_incremental_restore.update_layout(
+                                    xaxis_title="IncrementalRestoreEnabled",
+                                    yaxis_title="Espacio actual (GB)",
+                                    showlegend=False,
+                                )
+                                st.plotly_chart(
+                                    fig_incremental_restore,
+                                    width="stretch",
+                                )
+
+                        csv_incremental_restore = (
+                            df_incremental_restore.to_csv(index=False).encode("utf-8")
+                        )
+                        st.download_button(
+                            label="Descargar resultados en CSV",
+                            data=csv_incremental_restore,
+                            file_name="revision_incremental_restore.csv",
+                            mime="text/csv",
+                            key="dl_incremental_restore",
+                        )
+                except Exception as e:
+                    st.error(
+                        "Error al ejecutar la consulta de incremental restore: "
+                        f"{str(e)}"
+                    )
+
+    with tab_incremental_restore_history:
+        st.subheader("Análisis histórico de incremental restore")
+        st.markdown(
+            "Consulta el histórico de espacio de `PDCRINFO.TableSpace_Hst` para "
+            "tablas cuyo valor actual de `IncrementalRestoreEnabled` está informado."
+        )
+
+        if "incremental_restore_history_start_date" not in st.session_state:
+            st.session_state["incremental_restore_history_start_date"] = (
+                TODAY - timedelta(days=365)
+            )
+        if "incremental_restore_history_end_date" not in st.session_state:
+            st.session_state["incremental_restore_history_end_date"] = DEFAULT_END_DATE
+        if "incremental_restore_history_sql" not in st.session_state:
+            st.session_state["incremental_restore_history_sql"] = (
+                get_incremental_restore_history_sql(
+                    st.session_state["incremental_restore_history_start_date"],
+                    st.session_state["incremental_restore_history_end_date"],
+                )
+            )
+
+        col_restore_start_date, col_restore_end_date = st.columns(2)
+        with col_restore_start_date:
+            restore_history_start_date = st.date_input(
+                "Fecha inicial",
+                value=st.session_state["incremental_restore_history_start_date"],
+                key="input_incremental_restore_history_start_date",
+            )
+        with col_restore_end_date:
+            restore_history_end_date = st.date_input(
+                "Fecha final",
+                value=st.session_state["incremental_restore_history_end_date"],
+                key="input_incremental_restore_history_end_date",
+            )
+
+        if st.button(
+            "Actualizar fechas de la consulta",
+            key="btn_update_incremental_restore_history_dates",
+        ):
+            if restore_history_start_date > restore_history_end_date:
+                st.error("La fecha inicial no puede ser posterior a la fecha final.")
+            else:
+                st.session_state["incremental_restore_history_start_date"] = (
+                    restore_history_start_date
+                )
+                st.session_state["incremental_restore_history_end_date"] = (
+                    restore_history_end_date
+                )
+                st.session_state["incremental_restore_history_sql"] = (
+                    get_incremental_restore_history_sql(
+                        restore_history_start_date,
+                        restore_history_end_date,
+                    )
+                )
+                st.rerun()
+
+        st.caption(
+            "Al actualizar las fechas se regenera la consulta predeterminada. "
+            "El SQL se puede modificar antes de ejecutarlo."
+        )
+        sql_incremental_restore_history_input = st.text_area(
+            "Consulta histórica de incremental restore",
+            height=300,
+            key="incremental_restore_history_sql",
+        )
+
+        if st.button(
+            "Ejecutar análisis histórico",
+            type="primary",
+            key="btn_incremental_restore_history_exec",
+        ):
+            if not host or not user or not password:
+                st.error("Please fill in all connection details in the sidebar.")
+            elif not sql_incremental_restore_history_input.strip():
+                st.warning("Please enter a valid query.")
+            else:
+                running_message = st.empty()
+                try:
+                    running_message.markdown(
+                        '<div class="incremental-restore-running">'
+                        "Consultando el histórico de espacio de incremental restore..."
+                        "</div>",
+                        unsafe_allow_html=True,
+                    )
+                    try:
+                        df_incremental_restore_history = execute_teradata_query(
+                            sql_incremental_restore_history_input
+                        )
+                    finally:
+                        running_message.empty()
+
+                    st.success(
+                        f"Consulta completada. Se obtuvieron "
+                        f"{len(df_incremental_restore_history)} registros. "
+                        f"{query_duration_text()}"
+                    )
+                    if df_incremental_restore_history.empty:
+                        st.info(
+                            "No se encontraron registros para las fechas seleccionadas."
+                        )
+                    else:
+                        st.dataframe(df_incremental_restore_history)
+
+                        date_col = find_column_case_insensitive(
+                            df_incremental_restore_history, "LogDate"
+                        )
+                        restore_flag_col = find_column_case_insensitive(
+                            df_incremental_restore_history,
+                            "IncrementalRestoreEnabled",
+                        )
+                        table_space_col = find_column_case_insensitive(
+                            df_incremental_restore_history, "Current_Perm_GB"
+                        )
+
+                        if not date_col or not restore_flag_col or not table_space_col:
+                            st.warning(
+                                "No se puede generar el análisis. La consulta debe devolver "
+                                "LogDate, IncrementalRestoreEnabled y Current_Perm_GB."
+                            )
+                        else:
+                            chart_data = df_incremental_restore_history[
+                                [date_col, restore_flag_col, table_space_col]
+                            ].copy()
+                            chart_data["_restore_history_date"] = pd.to_datetime(
+                                chart_data[date_col], errors="coerce"
+                            )
+                            chart_data["_restore_history_flag"] = (
+                                chart_data[restore_flag_col]
+                                .astype("string")
+                                .fillna("Sin valor")
+                            )
+                            chart_data["_restore_history_space_gb"] = pd.to_numeric(
+                                chart_data[table_space_col], errors="coerce"
+                            )
+                            chart_data = chart_data.dropna(
+                                subset=[
+                                    "_restore_history_date",
+                                    "_restore_history_space_gb",
+                                ]
+                            )
+
+                            if chart_data.empty:
+                                st.warning(
+                                    "La consulta no contiene fechas o valores de espacio "
+                                    "válidos para analizar."
+                                )
+                            else:
+                                daily_summary = (
+                                    chart_data.groupby(
+                                        [
+                                            "_restore_history_date",
+                                            "_restore_history_flag",
+                                        ],
+                                        as_index=False,
+                                    )
+                                    .agg(
+                                        Current_Perm_GB=(
+                                            "_restore_history_space_gb",
+                                            "sum",
+                                        ),
+                                        Table_Count=(
+                                            "_restore_history_space_gb",
+                                            "size",
+                                        ),
+                                    )
+                                    .sort_values("_restore_history_date")
+                                )
+                                latest_date = daily_summary[
+                                    "_restore_history_date"
+                                ].max()
+                                latest_summary = daily_summary[
+                                    daily_summary["_restore_history_date"] == latest_date
+                                ].drop(columns="_restore_history_date")
+
+                                st.subheader(
+                                    "Espacio agregado por marca en la última fecha"
+                                )
+                                st.caption(
+                                    f"Última fecha con datos: {latest_date:%Y-%m-%d}"
+                                )
+                                st.dataframe(latest_summary, hide_index=True)
+
+                                fig_restore_history = px.line(
+                                    daily_summary,
+                                    x="_restore_history_date",
+                                    y="Current_Perm_GB",
+                                    color="_restore_history_flag",
+                                    color_discrete_sequence=active_sequence,
+                                )
+                                fig_restore_history = apply_td_layout(
+                                    fig_restore_history,
+                                    title_text=(
+                                        "Evolución del espacio por "
+                                        "IncrementalRestoreEnabled"
+                                    ),
+                                    y_label="Espacio actual (GB)",
+                                )
+                                fig_restore_history.update_layout(
+                                    xaxis_title="Fecha",
+                                    yaxis_title="Espacio actual (GB)",
+                                    legend_title_text="IncrementalRestoreEnabled",
+                                )
+                                st.plotly_chart(
+                                    fig_restore_history,
+                                    width="stretch",
+                                )
+
+                        csv_incremental_restore_history = (
+                            df_incremental_restore_history.to_csv(
+                                index=False
+                            ).encode("utf-8")
+                        )
+                        st.download_button(
+                            label="Descargar histórico en CSV",
+                            data=csv_incremental_restore_history,
+                            file_name="analisis_historico_incremental_restore.csv",
+                            mime="text/csv",
+                            key="dl_incremental_restore_history",
+                        )
+                except Exception as e:
+                    st.error(
+                        "Error al ejecutar el análisis histórico de incremental restore: "
+                        f"{str(e)}"
+                    )
+
+
+# =========================================================
+# PAGE 4: CONFIGURACIONES
 # =========================================================
 elif selected_page == "⚙️ Configuraciones":
     st.title("Configuraciones")
@@ -1815,6 +2997,7 @@ elif selected_page == "⚙️ Configuraciones":
                         {
                             "Sistema": connection["sistema"] or "Sin sistema",
                             "IP o dirección": connection["ip_address"],
+                            "Puerto": connection["port"],
                             "Usuario": connection["username"],
                         }
                         for connection in CONNECTIONS
@@ -1834,6 +3017,7 @@ elif selected_page == "⚙️ Configuraciones":
             edit_keys = {
                 "sistema": f"edit_connection_system_{edit_index}",
                 "ip_address": f"edit_connection_ip_{edit_index}",
+                "port": f"edit_connection_port_{edit_index}",
                 "username": f"edit_connection_username_{edit_index}",
                 "userpassword": f"edit_connection_password_{edit_index}",
             }
@@ -1848,6 +3032,14 @@ elif selected_page == "⚙️ Configuraciones":
                     "IP o dirección",
                     value=connection_to_update["ip_address"],
                     key=edit_keys["ip_address"],
+                )
+                updated_port = st.number_input(
+                    "Puerto Teradata",
+                    min_value=1,
+                    max_value=65535,
+                    value=int(connection_to_update["port"]),
+                    step=1,
+                    key=edit_keys["port"],
                 )
                 updated_username = st.text_input(
                     "Usuario",
@@ -1869,6 +3061,7 @@ elif selected_page == "⚙️ Configuraciones":
                 updated_connection = {
                     "sistema": updated_system.strip(),
                     "ip_address": updated_ip_address.strip(),
+                    "port": str(updated_port),
                     "username": updated_username.strip(),
                     "userpassword": (
                         updated_password
@@ -1878,9 +3071,17 @@ elif selected_page == "⚙️ Configuraciones":
                 }
                 if not all(
                     updated_connection[field].strip()
-                    for field in ("sistema", "ip_address", "username", "userpassword")
+                    for field in (
+                        "sistema",
+                        "ip_address",
+                        "port",
+                        "username",
+                        "userpassword",
+                    )
                 ):
-                    st.error("Sistema, dirección, usuario y contraseña son obligatorios.")
+                    st.error(
+                        "Sistema, dirección, puerto, usuario y contraseña son obligatorios."
+                    )
                 elif any(
                     char in updated_connection["sistema"]
                     + updated_connection["ip_address"]
@@ -1895,10 +3096,13 @@ elif selected_page == "⚙️ Configuraciones":
                 elif any(
                     index != edit_index
                     and connection["ip_address"] == updated_connection["ip_address"]
+                    and connection["port"] == updated_connection["port"]
                     and connection["username"] == updated_connection["username"]
                     for index, connection in enumerate(CONNECTIONS)
                 ):
-                    st.error("Ya existe una conexión con esa dirección y ese usuario.")
+                    st.error(
+                        "Ya existe una conexión con esa dirección, puerto y usuario."
+                    )
                 else:
                     updated_connections = CONNECTIONS.copy()
                     updated_connections[edit_index] = updated_connection
@@ -1951,6 +3155,14 @@ elif selected_page == "⚙️ Configuraciones":
                 "IP o dirección",
                 key="new_connection_ip_address",
             )
+            new_port = st.number_input(
+                "Puerto Teradata",
+                min_value=1,
+                max_value=65535,
+                value=DEFAULT_TD_PORT,
+                step=1,
+                key="new_connection_port",
+            )
             new_username = st.text_input("Usuario", key="new_connection_username")
             new_password = st.text_input(
                 "Contraseña",
@@ -1966,16 +3178,21 @@ elif selected_page == "⚙️ Configuraciones":
             new_connection = {
                 "sistema": new_system.strip(),
                 "ip_address": new_ip_address.strip(),
+                "port": str(new_port),
                 "username": new_username.strip(),
                 "userpassword": new_password,
             }
             if (
                 not new_connection["sistema"]
                 or not new_connection["ip_address"]
+                or not new_connection["port"]
                 or not new_connection["username"]
                 or not new_password.strip()
             ):
-                st.error("Introduce un sistema, una dirección, un usuario y una contraseña.")
+                st.error(
+                    "Introduce un sistema, una dirección, un puerto, un usuario "
+                    "y una contraseña."
+                )
             elif any(
                 char
                 in new_connection["sistema"]
@@ -1990,10 +3207,13 @@ elif selected_page == "⚙️ Configuraciones":
                 st.error("La contraseña no puede contener saltos de línea.")
             elif any(
                 connection["ip_address"] == new_connection["ip_address"]
+                and connection["port"] == new_connection["port"]
                 and connection["username"] == new_connection["username"]
                 for connection in CONNECTIONS
             ):
-                st.error("Ya existe una conexión con esa dirección y ese usuario.")
+                st.error(
+                    "Ya existe una conexión con esa dirección, puerto y usuario."
+                )
             else:
                 try:
                     save_connections([*CONNECTIONS, new_connection])
@@ -2002,7 +3222,8 @@ elif selected_page == "⚙️ Configuraciones":
                 else:
                     st.session_state["connections_notice"] = (
                         f"Se añadió la conexión «{new_connection['sistema']} — "
-                        f"{new_connection['ip_address']} — {new_connection['username']}»."
+                        f"{new_connection['ip_address']}:{new_connection['port']} — "
+                        f"{new_connection['username']}»."
                     )
                     st.rerun()
 
