@@ -2,7 +2,7 @@
 
 Aplicación web construida con Streamlit para consultar y analizar métricas operativas de entornos Teradata. Incluye informes interactivos, visualizaciones y descarga de resultados en CSV.
 
-**Versión actual: 1.0.16.** Incrementa el último número (`X`) en cada cambio de la aplicación.
+**Versión actual: 1.0.19.** Incrementa el último número (`X`) en cada cambio de la aplicación.
 
 ## Funcionalidades
 
@@ -80,20 +80,20 @@ Streamlit mostrará en la terminal la dirección local para abrir la aplicación
 ## Conexión a Teradata
 
 1. En la barra lateral, selecciona una conexión guardada o introduce un host personalizado.
-2. Introduce el usuario y la contraseña de Teradata.
+2. Introduce el usuario y, si la conexión lo requiere, la contraseña de Teradata.
 3. Usa **Test connection** para comprobar la conexión.
 4. Selecciona un análisis, ajusta las fechas o la consulta cuando corresponda y ejecútalo.
 
 La página **Configuraciones** gestiona `conexiones.conf`, un CSV separado por comas con esta cabecera y una conexión por fila:
 
 ```csv
-sistema,ip_address,port,username,userpassword
-Produccion,teradata.example.com,1025,mi_usuario,mi_contraseña
+sistema,ip_address,port,logmech,username,userpassword,save_password
+Produccion,teradata.example.com,1025,TDNEGO,mi_usuario,mi_contraseña,true
 ```
 
-Configuraciones permite añadir, modificar o quitar registros, incluido el puerto Teradata (por defecto `1025`). Al modificar una conexión, deja la contraseña vacía para conservar la guardada. Los ficheros CSV anteriores que no tengan las columnas `sistema` o `port` siguen siendo compatibles; se asigna el puerto predeterminado `1025` hasta que se guarden cambios.
+Configuraciones permite añadir, modificar o quitar registros, incluido el puerto Teradata (por defecto `1025`), el mecanismo de autenticación (`TD2`, `TDNEGO` o `LDAP`) y si se guarda la contraseña. La aplicación pasa la dirección y el puerto al controlador Teradata por separado. `TD2` mantiene el comportamiento predeterminado anterior. Al activar **No guardar la contraseña**, se guarda `save_password=false` y el campo `userpassword` queda vacío; se puede introducir una contraseña temporalmente en la barra lateral para usarla durante esa sesión. Al desactivar la opción, la contraseña vuelve a ser obligatoria para guardar la conexión. Al modificar una conexión con la opción desactivada, deja la contraseña vacía para conservar la guardada. Los ficheros CSV anteriores que no tengan las columnas `sistema`, `port`, `logmech` o `save_password` siguen siendo compatibles; se asignan el puerto `1025`, el mecanismo `TD2` y guardar la contraseña hasta que se guarden cambios.
 
-Al seleccionar una conexión en la barra lateral, la aplicación completa la dirección, el puerto, el usuario y la contraseña. También se puede elegir un host personalizado y ajustar su puerto en la barra lateral. El fichero guarda contraseñas en texto plano y la aplicación no autentica a sus usuarios: limita el acceso a la aplicación a tu equipo local o a una red de confianza, o sustituye el almacenamiento por un gestor de secretos. **No publiques `conexiones.conf`, `passwords.txt` ni credenciales en GitHub.** Las entradas antiguas de `passwords.txt` no se migran automáticamente porque no incluyen la dirección del servidor.
+Al seleccionar una conexión en la barra lateral, la aplicación completa la dirección, el puerto, el mecanismo de autenticación, el usuario y, si está guardada, la contraseña. Para un host personalizado se conserva el mecanismo `TD2`. Las contraseñas que sí se guardan están en texto plano y la aplicación no autentica a sus usuarios: limita el acceso a la aplicación a tu equipo local o a una red de confianza, o sustituye el almacenamiento por un gestor de secretos. **No publiques `conexiones.conf`, `passwords.txt` ni credenciales en GitHub.** Las entradas antiguas de `passwords.txt` no se migran automáticamente porque no incluyen la dirección del servidor.
 
 ## Uso responsable
 

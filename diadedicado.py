@@ -9,7 +9,7 @@ import streamlit as st
 import teradatasql
 from datetime import date, timedelta
 
-APP_VERSION = "1.0.16"
+APP_VERSION = "1.0.19"
 
 # --- Date Calculation Logic ---
 # Today's date reference
@@ -72,12 +72,16 @@ st.set_page_config(page_title="Teradata Management & Analysis", layout="wide")
 # --- Helpers for the local connections file ---
 CONNECTIONS_FILE = "conexiones.conf"
 DEFAULT_TD_PORT = 1025
+DEFAULT_TD_LOGMECH = "TD2"
+TD_LOGMECH_OPTIONS = ("TD2", "TDNEGO", "LDAP")
 CONNECTION_FIELDS = (
     "sistema",
     "ip_address",
     "port",
+    "logmech",
     "username",
     "userpassword",
+    "save_password",
 )
 LEGACY_CONNECTION_FIELDS = ("ip_address", "username", "userpassword")
 
@@ -99,15 +103,36 @@ def load_connections(file_path: str = CONNECTIONS_FILE) -> list[dict[str, str]]:
         connections = []
         for line_number, row in enumerate(reader, start=2):
             connection = {field: row.get(field) or "" for field in CONNECTION_FIELDS}
+            save_password_value = (row.get("save_password") or "true").strip().lower()
+            if save_password_value in ("true", "1", "yes"):
+                connection["save_password"] = "true"
+            elif save_password_value in ("false", "0", "no"):
+                connection["save_password"] = "false"
+            else:
+                raise ValueError(
+                    f"La opción de guardar contraseña de la fila {line_number} "
+                    "debe ser true o false."
+                )
             connection["sistema"] = connection["sistema"].strip()
             connection["ip_address"] = connection["ip_address"].strip()
             connection["username"] = connection["username"].strip()
             connection["port"] = connection["port"].strip() or str(DEFAULT_TD_PORT)
+            connection["logmech"] = (
+                connection["logmech"].strip().upper() or DEFAULT_TD_LOGMECH
+            )
             if not all(
-                connection[field].strip() for field in LEGACY_CONNECTION_FIELDS
+                connection[field].strip()
+                for field in ("ip_address", "username")
             ):
                 raise ValueError(
-                    f"La fila {line_number} debe incluir dirección, usuario y contraseña."
+                    f"La fila {line_number} debe incluir dirección y usuario."
+                )
+            if connection["save_password"] == "false":
+                connection["userpassword"] = ""
+            elif not connection["userpassword"].strip():
+                raise ValueError(
+                    f"La fila {line_number} debe incluir contraseña o indicar "
+                    "save_password=false."
                 )
             try:
                 port = int(connection["port"])
@@ -118,6 +143,11 @@ def load_connections(file_path: str = CONNECTIONS_FILE) -> list[dict[str, str]]:
             if not 1 <= port <= 65535:
                 raise ValueError(
                     f"El puerto de la fila {line_number} debe estar entre 1 y 65535."
+                )
+            if connection["logmech"] not in TD_LOGMECH_OPTIONS:
+                raise ValueError(
+                    f"El mecanismo de autenticación de la fila {line_number} "
+                    f"debe ser uno de: {', '.join(TD_LOGMECH_OPTIONS)}."
                 )
             connection["port"] = str(port)
             connections.append(connection)
@@ -147,7 +177,21 @@ def save_connections(
                 lineterminator="\n",
             )
             writer.writeheader()
-            writer.writerows(connections)
+            serialized_connections = []
+            for connection in connections:
+                save_password = str(
+                    connection.get("save_password", "true")
+                ).strip().lower() not in ("false", "0", "no")
+                serialized_connection = {
+                    field: connection.get(field, "") for field in CONNECTION_FIELDS
+                }
+                serialized_connection["save_password"] = (
+                    "true" if save_password else "false"
+                )
+                if not save_password:
+                    serialized_connection["userpassword"] = ""
+                serialized_connections.append(serialized_connection)
+            writer.writerows(serialized_connections)
         os.replace(temporary_path, file_path)
     except OSError:
         if temporary_path and os.path.exists(temporary_path):
@@ -260,7 +304,7 @@ for connection_index, connection in enumerate(CONNECTIONS):
     system_label = connection["sistema"] or "Sin sistema"
     label = (
         f"{system_label} — {connection['ip_address']}:{connection['port']} — "
-        f"{connection['username']}"
+        f"{connection['username']} [{connection['logmech']}]"
     )
     if label in connections_by_label:
         suffix = 2
@@ -297,6 +341,7 @@ selected_connection = connections_by_label.get(selected_host_option)
 if selected_connection:
     host = selected_connection["ip_address"]
     port = int(selected_connection["port"])
+    logmech = selected_connection["logmech"]
 else:
     host = st.sidebar.text_input("Enter custom host / IP", value="")
     port = st.sidebar.number_input(
@@ -307,11 +352,16 @@ else:
         step=1,
         key="custom_connection_port",
     )
+    logmech = DEFAULT_TD_LOGMECH
 
 user = st.sidebar.text_input("Username", key="connection_username")
 password = st.sidebar.text_input(
     "Password",
     type="password",
+    help=(
+        "Para conexiones configuradas para no guardar la contraseña, puedes "
+        "introducirla aquí solo para esta sesión."
+    ),
     key="connection_password",
 )
 
@@ -323,10 +373,11 @@ if CONNECTIONS_ERROR:
 def execute_teradata_query(sql_query: str):
     started_at = time.perf_counter()
     try:
-        connection_host = f"[{host}]" if ":" in host and not host.startswith("[") else host
         with teradatasql.connect(
-            host=f"{connection_host}:{port}",
+            host=host,
+            dbs_port=port,
             user=user,
+            logmech=logmech,
             password=password,
         ) as conn:
             result = pd.read_sql(sql_query, conn)
@@ -346,8 +397,16 @@ def query_duration_text() -> str:
 
 # Sidebar Test Connection Button
 if st.sidebar.button("🔌 Test connection", key="btn_test_conn", use_container_width=True):
-    if not host or not user or not password:
-        st.sidebar.error("Please provide Host, Username, and Password.")
+    password_required = (
+        not selected_connection or selected_connection["save_password"] == "true"
+    )
+    if not host or not user or (password_required and not password):
+        required_fields = (
+            "Host, Username, and Password"
+            if password_required
+            else "Host and Username"
+        )
+        st.sidebar.error(f"Please provide {required_fields}.")
     else:
         try:
             with st.sidebar.spinner("Testing connection..."):
@@ -2972,8 +3031,8 @@ elif selected_page == "⚙️ Configuraciones":
     st.markdown('<div class="td-accent-bar"></div>', unsafe_allow_html=True)
     st.warning(
         "Esta aplicación no autentica usuarios. Limita el acceso a este panel "
-        "a tu equipo local o a una red de confianza. Las contraseñas se guardan "
-        "en texto plano en `conexiones.conf`."
+        "a tu equipo local o a una red de confianza. Las contraseñas que decidas "
+        "guardar se almacenan en texto plano en `conexiones.conf`."
     )
 
     if "connections_notice" in st.session_state:
@@ -2998,7 +3057,11 @@ elif selected_page == "⚙️ Configuraciones":
                             "Sistema": connection["sistema"] or "Sin sistema",
                             "IP o dirección": connection["ip_address"],
                             "Puerto": connection["port"],
+                            "Autenticación": connection["logmech"],
                             "Usuario": connection["username"],
+                            "Contraseña guardada": (
+                                "Sí" if connection["save_password"] == "true" else "No"
+                            ),
                         }
                         for connection in CONNECTIONS
                     ]
@@ -3018,8 +3081,10 @@ elif selected_page == "⚙️ Configuraciones":
                 "sistema": f"edit_connection_system_{edit_index}",
                 "ip_address": f"edit_connection_ip_{edit_index}",
                 "port": f"edit_connection_port_{edit_index}",
+                "logmech": f"edit_connection_logmech_{edit_index}",
                 "username": f"edit_connection_username_{edit_index}",
                 "userpassword": f"edit_connection_password_{edit_index}",
+                "save_password": f"edit_connection_save_password_{edit_index}",
             }
 
             with st.form("edit_connection_form"):
@@ -3041,15 +3106,33 @@ elif selected_page == "⚙️ Configuraciones":
                     step=1,
                     key=edit_keys["port"],
                 )
+                updated_logmech = st.selectbox(
+                    "Mecanismo de autenticación",
+                    options=TD_LOGMECH_OPTIONS,
+                    index=TD_LOGMECH_OPTIONS.index(
+                        connection_to_update["logmech"]
+                    ),
+                    key=edit_keys["logmech"],
+                )
                 updated_username = st.text_input(
                     "Usuario",
                     value=connection_to_update["username"],
                     key=edit_keys["username"],
                 )
+                updated_no_save_password = st.checkbox(
+                    "No guardar la contraseña en conexiones.conf",
+                    value=connection_to_update["save_password"] == "false",
+                    help=(
+                        "Si se activa, la contraseña se elimina del fichero. "
+                        "Podrás introducirla en la barra lateral para usarla "
+                        "solo durante esta sesión."
+                    ),
+                    key=edit_keys["save_password"],
+                )
                 updated_password = st.text_input(
-                    "Contraseña (vacío para conservar la actual)",
+                    "Contraseña (opcional si no se guarda; vacía para conservar la actual)",
                     type="password",
-                    placeholder="Dejar vacío para conservarla",
+                    placeholder="Nueva contraseña",
                     key=edit_keys["userpassword"],
                 )
                 update_connection = st.form_submit_button(
@@ -3062,13 +3145,19 @@ elif selected_page == "⚙️ Configuraciones":
                     "sistema": updated_system.strip(),
                     "ip_address": updated_ip_address.strip(),
                     "port": str(updated_port),
+                    "logmech": updated_logmech,
                     "username": updated_username.strip(),
-                    "userpassword": (
+                    "save_password": (
+                        "false" if updated_no_save_password else "true"
+                    ),
+                    "userpassword": "",
+                }
+                if updated_connection["save_password"] == "true":
+                    updated_connection["userpassword"] = (
                         updated_password
                         if updated_password
                         else connection_to_update["userpassword"]
-                    ),
-                }
+                    )
                 if not all(
                     updated_connection[field].strip()
                     for field in (
@@ -3076,11 +3165,17 @@ elif selected_page == "⚙️ Configuraciones":
                         "ip_address",
                         "port",
                         "username",
-                        "userpassword",
                     )
                 ):
                     st.error(
-                        "Sistema, dirección, puerto, usuario y contraseña son obligatorios."
+                        "Sistema, dirección, puerto y usuario son obligatorios."
+                    )
+                elif (
+                    updated_connection["save_password"] == "true"
+                    and not updated_connection["userpassword"].strip()
+                ):
+                    st.error(
+                        "Introduce una contraseña o activa la opción para no guardarla."
                     )
                 elif any(
                     char in updated_connection["sistema"]
@@ -3091,17 +3186,24 @@ elif selected_page == "⚙️ Configuraciones":
                     st.error(
                         "Sistema, dirección y usuario no pueden contener saltos de línea."
                     )
-                elif any(char in updated_connection["userpassword"] for char in "\r\n"):
+                elif (
+                    updated_connection["save_password"] == "true"
+                    and any(
+                        char in updated_connection["userpassword"] for char in "\r\n"
+                    )
+                ):
                     st.error("La contraseña no puede contener saltos de línea.")
                 elif any(
                     index != edit_index
                     and connection["ip_address"] == updated_connection["ip_address"]
                     and connection["port"] == updated_connection["port"]
+                    and connection["logmech"] == updated_connection["logmech"]
                     and connection["username"] == updated_connection["username"]
                     for index, connection in enumerate(CONNECTIONS)
                 ):
                     st.error(
-                        "Ya existe una conexión con esa dirección, puerto y usuario."
+                        "Ya existe una conexión con esa dirección, puerto, "
+                        "mecanismo de autenticación y usuario."
                     )
                 else:
                     updated_connections = CONNECTIONS.copy()
@@ -3114,6 +3216,7 @@ elif selected_page == "⚙️ Configuraciones":
                         st.session_state["connections_notice"] = (
                             f"Se modificó la conexión de «{connection_to_edit}»."
                         )
+                        st.session_state.pop("_credential_selection", None)
                         for key in edit_keys.values():
                             st.session_state.pop(key, None)
                         st.rerun()
@@ -3163,9 +3266,23 @@ elif selected_page == "⚙️ Configuraciones":
                 step=1,
                 key="new_connection_port",
             )
+            new_logmech = st.selectbox(
+                "Mecanismo de autenticación",
+                options=TD_LOGMECH_OPTIONS,
+                index=TD_LOGMECH_OPTIONS.index(DEFAULT_TD_LOGMECH),
+                key="new_connection_logmech",
+            )
             new_username = st.text_input("Usuario", key="new_connection_username")
+            new_no_save_password = st.checkbox(
+                "No guardar la contraseña en conexiones.conf",
+                help=(
+                    "Si se activa, podrás introducirla en la barra lateral para "
+                    "usarla solo durante esta sesión."
+                ),
+                key="new_connection_save_password",
+            )
             new_password = st.text_input(
-                "Contraseña",
+                "Contraseña (opcional si no se guarda)",
                 type="password",
                 key="new_connection_password",
             )
@@ -3179,19 +3296,26 @@ elif selected_page == "⚙️ Configuraciones":
                 "sistema": new_system.strip(),
                 "ip_address": new_ip_address.strip(),
                 "port": str(new_port),
+                "logmech": new_logmech,
                 "username": new_username.strip(),
-                "userpassword": new_password,
+                "save_password": "false" if new_no_save_password else "true",
+                "userpassword": "" if new_no_save_password else new_password,
             }
             if (
                 not new_connection["sistema"]
                 or not new_connection["ip_address"]
                 or not new_connection["port"]
                 or not new_connection["username"]
-                or not new_password.strip()
             ):
                 st.error(
-                    "Introduce un sistema, una dirección, un puerto, un usuario "
-                    "y una contraseña."
+                    "Introduce un sistema, una dirección, un puerto y un usuario."
+                )
+            elif (
+                new_connection["save_password"] == "true"
+                and not new_connection["userpassword"].strip()
+            ):
+                st.error(
+                    "Introduce una contraseña o activa la opción para no guardarla."
                 )
             elif any(
                 char
@@ -3203,16 +3327,21 @@ elif selected_page == "⚙️ Configuraciones":
                 st.error(
                     "Sistema, dirección y usuario no pueden contener saltos de línea."
                 )
-            elif any(char in new_password for char in "\r\n"):
+            elif (
+                new_connection["save_password"] == "true"
+                and any(char in new_password for char in "\r\n")
+            ):
                 st.error("La contraseña no puede contener saltos de línea.")
             elif any(
                 connection["ip_address"] == new_connection["ip_address"]
                 and connection["port"] == new_connection["port"]
+                and connection["logmech"] == new_connection["logmech"]
                 and connection["username"] == new_connection["username"]
                 for connection in CONNECTIONS
             ):
                 st.error(
-                    "Ya existe una conexión con esa dirección, puerto y usuario."
+                    "Ya existe una conexión con esa dirección, puerto, "
+                    "mecanismo de autenticación y usuario."
                 )
             else:
                 try:
