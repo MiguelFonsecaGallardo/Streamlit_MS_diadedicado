@@ -1,0 +1,7 @@
+conexiones.conf
+passwords.txt
+.DS_Store
+__pycache__/
+*.py[cod]
+*.bak
+/old/

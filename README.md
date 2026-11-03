@@ -2,6 +2,8 @@
 
 Aplicación web construida con Streamlit para consultar y analizar métricas operativas de entornos Teradata. Incluye informes interactivos, visualizaciones y descarga de resultados en CSV.
 
+**Versión actual: 1.0.4.** Incrementa el último número (`X`) en cada cambio de la aplicación.
+
 ## Funcionalidades
 
 ### Gráficas dia dedicado
@@ -20,7 +22,14 @@ Aplicación web construida con Streamlit para consultar y analizar métricas ope
 - Análisis de errores de espacio («No more room»).
 - Análisis de errores de spool (códigos Teradata 2646 y 2647).
 
+### Configuraciones
+
+- Añadir, modificar y quitar conexiones Teradata guardadas localmente en `conexiones.conf`.
+- Consultar sistema, dirección y usuario; las contraseñas no se muestran.
+
 Los análisis que trabajan con fechas permiten seleccionar un intervalo. Por defecto, la aplicación propone desde el primer día del mes anterior hasta ayer. Los resultados pueden incluir tablas y gráficos; los informes que ofrecen exportación se pueden descargar en formato CSV.
+
+El análisis de phantom spool utiliza por defecto el intervalo desde el primer día del mes anterior hasta ayer. La consulta generada sigue siendo editable.
 
 ## Requisitos
 
@@ -56,12 +65,21 @@ Streamlit mostrará en la terminal la dirección local para abrir la aplicación
 
 ## Conexión a Teradata
 
-1. En la barra lateral, selecciona un host configurado o introduce uno personalizado.
+1. En la barra lateral, selecciona una conexión guardada o introduce un host personalizado.
 2. Introduce el usuario y la contraseña de Teradata.
 3. Usa **Test connection** para comprobar la conexión.
 4. Selecciona un análisis, ajusta las fechas o la consulta cuando corresponda y ejecútalo.
 
-La aplicación puede precargar contraseñas desde un archivo local `passwords.txt`, con una entrada por línea en el formato `usuario:contraseña`. Este mecanismo guarda credenciales en texto plano: es preferible introducirlas en la aplicación o sustituirlo por un gestor de secretos. **No publiques `passwords.txt` ni credenciales en GitHub.**
+La página **Configuraciones** gestiona `conexiones.conf`, un CSV separado por comas con esta cabecera y una conexión por fila:
+
+```csv
+sistema,ip_address,username,userpassword
+Produccion,teradata.example.com,mi_usuario,mi_contraseña
+```
+
+Configuraciones permite añadir, modificar o quitar registros. Al modificar una conexión, deja la contraseña vacía para conservar la guardada. Los ficheros CSV creados con la cabecera anterior (`ip_address,username,userpassword`) siguen siendo compatibles; al guardar cambios, se añade la columna `sistema`, inicialmente vacía para las conexiones anteriores.
+
+Al seleccionar una conexión en la barra lateral, la aplicación completa la dirección, el usuario y la contraseña. También se puede elegir un host personalizado e introducir las credenciales manualmente. El fichero guarda contraseñas en texto plano y la aplicación no autentica a sus usuarios: limita el acceso a la aplicación a tu equipo local o a una red de confianza, o sustituye el almacenamiento por un gestor de secretos. **No publiques `conexiones.conf`, `passwords.txt` ni credenciales en GitHub.** Las entradas antiguas de `passwords.txt` no se migran automáticamente porque no incluyen la dirección del servidor.
 
 ## Uso responsable
 
