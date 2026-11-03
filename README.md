@@ -2,7 +2,7 @@
 
 Aplicación web construida con Streamlit para consultar y analizar métricas operativas de entornos Teradata. Incluye informes interactivos, visualizaciones y descarga de resultados en CSV.
 
-**Versión actual: 1.0.4.** Incrementa el último número (`X`) en cada cambio de la aplicación.
+**Versión actual: 1.0.5.** Incrementa el último número (`X`) en cada cambio de la aplicación.
 
 ## Funcionalidades
 
@@ -29,7 +29,7 @@ Aplicación web construida con Streamlit para consultar y analizar métricas ope
 
 Los análisis que trabajan con fechas permiten seleccionar un intervalo. Por defecto, la aplicación propone desde el primer día del mes anterior hasta ayer. Los resultados pueden incluir tablas y gráficos; los informes que ofrecen exportación se pueden descargar en formato CSV.
 
-El análisis de phantom spool utiliza por defecto el intervalo desde el primer día del mes anterior hasta ayer. La consulta generada sigue siendo editable.
+El análisis de phantom spool no limita los resultados por fecha en su consulta predeterminada. La consulta generada sigue siendo editable.
 
 ## Requisitos
 

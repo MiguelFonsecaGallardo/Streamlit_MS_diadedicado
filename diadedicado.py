@@ -8,7 +8,7 @@ import streamlit as st
 import teradatasql
 from datetime import date, timedelta
 
-APP_VERSION = "1.0.4"
+APP_VERSION = "1.0.5"
 
 # --- Date Calculation Logic ---
 # Today's date reference
@@ -440,10 +440,8 @@ WHERE A.F_INICIO BETWEEN '{start_str}' AND '{end_str}'
 QUALIFY ROW_NUMBER() OVER (PARTITION BY A.BACKUP ORDER BY A.F_INICIO DESC) = 1;""".strip()
 
 
-def get_phantom_spool_sql(start_date, end_date):
-    start_str = start_date.strftime("%Y-%m-%d")
-    end_str = end_date.strftime("%Y-%m-%d")
-    return f"""SELECT DatabaseName,
+def get_phantom_spool_sql():
+    return """SELECT DatabaseName,
        ROUND(SUM(CurrentSpool)/(1024*1024*1024)) AS TOTAL_GB
 FROM DBC.Diskspacev
 WHERE DatabaseName NOT IN (
@@ -451,7 +449,6 @@ WHERE DatabaseName NOT IN (
     FROM DBC.SessionInfo
 )
 AND CurrentSpool > 0
-AND LogDate BETWEEN '{start_str}' AND '{end_str}'
 GROUP BY DatabaseName
 ORDER BY 2 DESC;""".strip()
 
@@ -1455,10 +1452,15 @@ elif selected_page == "🔍 Revisiones":
         st.subheader("Phantom spool detection")
 
         if "spool_sql_page2" not in st.session_state:
-            st.session_state["spool_sql_page2"] = get_phantom_spool_sql(
-                DEFAULT_START_DATE,
-                DEFAULT_END_DATE,
+            st.session_state["spool_sql_page2"] = get_phantom_spool_sql()
+
+        if not st.session_state.get("phantom_spool_date_filter_removed"):
+            st.session_state["spool_sql_page2"] = "\n".join(
+                line
+                for line in st.session_state["spool_sql_page2"].splitlines()
+                if not line.strip().upper().startswith("AND LOGDATE BETWEEN")
             )
+            st.session_state["phantom_spool_date_filter_removed"] = True
 
         sql_spool_input = st.text_area(
             "Phantom spool query definition",
