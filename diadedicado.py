@@ -9,7 +9,7 @@ import streamlit as st
 import teradatasql
 from datetime import date, timedelta
 
-APP_VERSION = "1.0.19"
+APP_VERSION = "1.0.20"
 
 # --- Date Calculation Logic ---
 # Today's date reference
@@ -3050,6 +3050,57 @@ elif selected_page == "⚙️ Configuraciones":
                 f"{len(CONNECTIONS)} conexión(es) guardada(s). "
                 "Las contraseñas no se muestran."
             )
+            st.subheader("Orden de las conexiones")
+            st.caption(
+                "El orden guardado también determina el orden del selector "
+                "de conexiones en la barra lateral."
+            )
+            connection_to_move = st.selectbox(
+                "Conexión que quieres reordenar",
+                options=connection_labels,
+                key="order_connection_selection",
+            )
+            move_index = connection_indexes_by_label[connection_to_move]
+            move_up_column, move_down_column = st.columns(2)
+            if move_up_column.button(
+                "Mover arriba",
+                disabled=move_index == 0,
+                key="move_connection_up",
+            ):
+                updated_connections = CONNECTIONS.copy()
+                updated_connections[move_index - 1], updated_connections[move_index] = (
+                    updated_connections[move_index],
+                    updated_connections[move_index - 1],
+                )
+                try:
+                    save_connections(updated_connections)
+                except OSError as exc:
+                    st.error(f"No se pudo actualizar {CONNECTIONS_FILE}: {exc}")
+                else:
+                    st.session_state["connections_notice"] = (
+                        f"Se movió arriba la conexión «{connection_to_move}»."
+                    )
+                    st.rerun()
+            if move_down_column.button(
+                "Mover abajo",
+                disabled=move_index == len(CONNECTIONS) - 1,
+                key="move_connection_down",
+            ):
+                updated_connections = CONNECTIONS.copy()
+                updated_connections[move_index], updated_connections[move_index + 1] = (
+                    updated_connections[move_index + 1],
+                    updated_connections[move_index],
+                )
+                try:
+                    save_connections(updated_connections)
+                except OSError as exc:
+                    st.error(f"No se pudo actualizar {CONNECTIONS_FILE}: {exc}")
+                else:
+                    st.session_state["connections_notice"] = (
+                        f"Se movió abajo la conexión «{connection_to_move}»."
+                    )
+                    st.rerun()
+
             st.dataframe(
                 pd.DataFrame(
                     [

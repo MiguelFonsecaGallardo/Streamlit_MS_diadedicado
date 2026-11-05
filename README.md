@@ -2,7 +2,7 @@
 
 Aplicación web construida con Streamlit para consultar y analizar métricas operativas de entornos Teradata. Incluye informes interactivos, visualizaciones y descarga de resultados en CSV.
 
-**Versión actual: 1.0.19.** Incrementa el último número (`X`) en cada cambio de la aplicación.
+**Versión actual: 1.0.20.** Incrementa el último número (`X`) en cada cambio de la aplicación.
 
 ## Funcionalidades
 
@@ -36,7 +36,7 @@ Aplicación web construida con Streamlit para consultar y analizar métricas ope
 
 ### Configuraciones
 
-- Añadir, modificar y quitar conexiones Teradata guardadas localmente en `conexiones.conf`.
+- Ordenar, añadir, modificar y quitar conexiones Teradata guardadas localmente en `conexiones.conf`.
 - Consultar sistema, dirección, puerto y usuario; las contraseñas no se muestran.
 
 Los análisis que trabajan con fechas permiten seleccionar un intervalo. Por defecto, la aplicación propone desde el primer día del mes anterior hasta ayer. Los resultados pueden incluir tablas y gráficos; los informes que ofrecen exportación se pueden descargar en formato CSV.
@@ -91,7 +91,7 @@ sistema,ip_address,port,logmech,username,userpassword,save_password
 Produccion,teradata.example.com,1025,TDNEGO,mi_usuario,mi_contraseña,true
 ```
 
-Configuraciones permite añadir, modificar o quitar registros, incluido el puerto Teradata (por defecto `1025`), el mecanismo de autenticación (`TD2`, `TDNEGO` o `LDAP`) y si se guarda la contraseña. La aplicación pasa la dirección y el puerto al controlador Teradata por separado. `TD2` mantiene el comportamiento predeterminado anterior. Al activar **No guardar la contraseña**, se guarda `save_password=false` y el campo `userpassword` queda vacío; se puede introducir una contraseña temporalmente en la barra lateral para usarla durante esa sesión. Al desactivar la opción, la contraseña vuelve a ser obligatoria para guardar la conexión. Al modificar una conexión con la opción desactivada, deja la contraseña vacía para conservar la guardada. Los ficheros CSV anteriores que no tengan las columnas `sistema`, `port`, `logmech` o `save_password` siguen siendo compatibles; se asignan el puerto `1025`, el mecanismo `TD2` y guardar la contraseña hasta que se guarden cambios.
+Configuraciones permite ordenar, añadir, modificar o quitar registros, incluido el puerto Teradata (por defecto `1025`), el mecanismo de autenticación (`TD2`, `TDNEGO` o `LDAP`) y si se guarda la contraseña. El orden guardado determina también el orden del selector de conexiones en la barra lateral. La aplicación pasa la dirección y el puerto al controlador Teradata por separado. `TD2` mantiene el comportamiento predeterminado anterior. Al activar **No guardar la contraseña**, se guarda `save_password=false` y el campo `userpassword` queda vacío; se puede introducir una contraseña temporalmente en la barra lateral para usarla durante esa sesión. Al desactivar la opción, la contraseña vuelve a ser obligatoria para guardar la conexión. Al modificar una conexión con la opción desactivada, deja la contraseña vacía para conservar la guardada. Los ficheros CSV anteriores que no tengan las columnas `sistema`, `port`, `logmech` o `save_password` siguen siendo compatibles; se asignan el puerto `1025`, el mecanismo `TD2` y guardar la contraseña hasta que se guarden cambios.
 
 Al seleccionar una conexión en la barra lateral, la aplicación completa la dirección, el puerto, el mecanismo de autenticación, el usuario y, si está guardada, la contraseña. Para un host personalizado se conserva el mecanismo `TD2`. Las contraseñas que sí se guardan están en texto plano y la aplicación no autentica a sus usuarios: limita el acceso a la aplicación a tu equipo local o a una red de confianza, o sustituye el almacenamiento por un gestor de secretos. **No publiques `conexiones.conf`, `passwords.txt` ni credenciales en GitHub.** Las entradas antiguas de `passwords.txt` no se migran automáticamente porque no incluyen la dirección del servidor.
 
